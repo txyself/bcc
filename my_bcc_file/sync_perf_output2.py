@@ -1,57 +1,54 @@
 #!/usr/bin/python
-# 2019 by Cyrus
+#
+# This is a Hello World example that uses BPF_PERF_OUTPUT.
 
-from __future__ import print_function
 from bcc import BPF
 from bcc.utils import printb
 
-# load BPF program
-b = BPF(text="""
-#include <uapi/linux/ptrace.h>
+# define BPF program
+prog = """
+#include <linux/sched.h>
+
+// define output data structure in C
 struct data_t {
-    u32 pid;
-    u64 delta;
-    u64 time;
+    u64 ts;
 };
-BPF_HASH(last);
-BPF_PERF_OUTPUT(result);
-int do_trace(struct pt_regs *ctx) {
-    u64 ts, *tsp, delta, key = 0;
+BPF_PERF_OUTPUT(events);
+
+int hello(struct pt_regs *ctx) {
     struct data_t data = {};
-    // attempt to read stored timestamp
-    tsp = last.lookup(&key);
-    if (tsp != 0) {
-        delta = bpf_ktime_get_ns() - *tsp;
-        if (delta < 1000000000) {
-            // output if time is less than 1 second
-            data.pid = bpf_get_current_pid_tgid();
-            data.delta = delta / 1000000;
-            data.time = bpf_ktime_get_ns();
-            result.perf_submit(ctx, &data, sizeof(data));
-        }
-        last.delete(&key);
-    }
-    // update stored timestamp
-    ts = bpf_ktime_get_ns();
-    last.update(&key, &ts);
+
+    data.ts = bpf_ktime_get_ns();
+
+    events.perf_submit(ctx, &data, sizeof(data));
+
     return 0;
 }
-""")
+"""
 
-b.attach_kprobe(event=b.get_syscall_fnname("sync"), fn_name="do_trace")
-print("Tracing for quick sync's... Ctrl-C to end")
+# load BPF program
+b = BPF(text=prog)
+b.attach_kprobe(event=b.get_syscall_fnname("sync"), fn_name="hello")
 
-# format output
+# header
+# print("%-18s %-16s %-6s %s" % ("TIME(s)", "COMM", "PID", "MESSAGE"))
+
+# process event
 start = 0
+previous = 0
 def print_event(cpu, data, size):
-    global start
-    event = b["result"].event(data)
+    global start, previous
+    event = b["events"].event(data)
     if start == 0:
-        start = int(event.time)
-    start_time = (int(event.time) - start) / 1000000;
-    print(b"[PID:%6s] At time %d ms: multiple syncs detected, last %s ms ago" % (event.pid, start_time, event.delta))
-b["result"].open_perf_buffer(print_event)
-
+            start = event.ts
+    else:
+        time_s = (float(event.ts - start)) / 1000000000
+        interval = event.ts - previous
+        if interval < 1000000000:
+            printb(b"At time %.2f s: multiple syncs detected, last %d ms ago" % (time_s, interval))
+    previous = event.ts
+# loop with callback to print_event
+b["events"].open_perf_buffer(print_event)
 while 1:
     try:
         b.perf_buffer_poll()

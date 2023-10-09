@@ -59,3 +59,41 @@ BPF(text='int kprobe__sys_sync(void *ctx) { bpf_trace_printk("sys_sync() called!
 通过尝试发现，应该是在请求完成后，内核会将__data_len归零，而disksnoop.py中获取__data_len的方式是在请求完成后获取的，导致无法正确反映读写大小。<br>
 通过修改，在发送请求时保存读写大小，从而正确输出。<br>
 
+
+
+### hello_perf_output.py 
+
+要学的知识点：
+
+1. `struct data_t` 一个简单的 C 语言结构体，用于从内核态向用户态传输数据。
+2. `BPF_PERF_OUTPUT(result)` 表明内核传出的数据将会打印到 “result” 这个通道内（译者注：实际上这就是 bpf 对象的一个 key，可以通过 `bpf_object["result"]` 的方式读取。）
+3. `struct data_t data = {};` 创建一个空的 data_t 结构体，之后在填充。
+4. `bpf_get_current_pid_tgid()` 返回以下内容：位于低 32 位的进程 ID（内核态中的 PID，用户态中实际为线程 ID），位于高 32 位的线程组 ID（用户态中实际为 PID）。我们通常将结果通过 u32 取出，直接丢弃最高的 32 位。我们优先选择了 PID（← 指内核态的）而不是 TGID（← 内核态线程组 ID），是因为多线程应用程序的 TGID 是相通的，因此需要 PID 来区分他们。通常这也是我们代码的用户所关心的。
+5. `bpf_get_current_comm(&data.comm, sizeof(data.comm));` 将当前参数名填充到指定位置。
+6. `reault.perf_submit()` 通过 perf 缓冲区环将结果提交到用户态。
+7. `def print_event()` 定义一个函数从 `result` 流中读取 event。（译者注：这里的 cpu, data, size 是默认的传入内容，连接到流上的函数必须要有这些参数）。
+8. `b["events"].event(data)` 通过 Python 从 `result` 中获取 event。
+9. `b["events"].open_perf_buffer(print_event)` 将 `print_event` 函数连接在 `result` 流上、
+10. `while 1: b.perf_buffer_poll()` 阻塞的循环获取结果。
+
+这些未来的 bcc 版本中可能有所改进。 例如，Python 数据结构可以从 C 代码自动生成。
+
+
+
+### sync_perf_output.py
+
+使用 `BPF_PERF_OUTPUT` 重新编写 sync_timing.py。
+
+
+
+### bitehist.py
+
+本节课要学的知识点有：
+
+1. `BPF_HISTOGRAM(hist)` 定义一个直方图形式的 BPF 映射（译者注：区别于之前的 hash 映射），名为 hist。
+2. `dist.increment()` 第一个参数的运算结果作为直方图索引的递增量，默认为 1。自定义的递增量可以作为第二个参数提供。
+3. `bpf_log2l()` 返回参数以 2 为底的对数值。 这将作为我们直方图的索引，因此我们正在构建 2 的幂直方图。
+4. `b["dist"].print_log2_hist("kbytes")` 将直方图 dist 的索引打印为 2 的幂，列标题为 “kbytes”。从内核态传到用户态的唯一数据是这一系列索引项的总计数，从而提高了效率。（译者注：因为一个 2 的幂实际上对应多个索引，比如第 3 行包含了 2^2 至 2^3-1 的多个索引的计数之和。）
+
+
+
